@@ -536,6 +536,7 @@ def main():
         for item in items:
             created_at = item.get("created_at") or ""
             updated_at = item.get("updated_at") or ""
+            pushed_at = item.get("pushed_at") or ""
             collected.append(
                 {
                     "id": len(collected) + 1,
@@ -550,6 +551,8 @@ def main():
                     "createdIso": created_at,
                     "updated": updated_at.split("T")[0] if updated_at else "",
                     "updatedIso": updated_at,
+                    "pushed": pushed_at.split("T")[0] if pushed_at else "",
+                    "pushedIso": pushed_at,
                     "archived": bool(item.get("archived")),
                 }
             )

@@ -15,6 +15,8 @@ interface RepoItem {
   createdIso: string;
   updated: string;
   updatedIso: string;
+  pushed: string;
+  pushedIso: string;
   archived: boolean;
 }
 
@@ -547,6 +549,8 @@ async function main() {
         createdIso: String(item.created_at || ""),
         updated: item.updated_at ? String(item.updated_at).split("T")[0] : "",
         updatedIso: String(item.updated_at || ""),
+        pushed: item.pushed_at ? String(item.pushed_at).split("T")[0] : "",
+        pushedIso: String(item.pushed_at || ""),
         archived: Boolean(item.archived),
       });
       if (collected.length >= 1000) break;

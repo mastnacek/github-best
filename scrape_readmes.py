@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Scrapes README.md files for top 1,000 repositories using GitHub API (gh auth token or HTTPS),
-stores markdown files in `readmes/`, and indexes them in SQLite FTS5 database `data/repos.db`.
+Differential Scraper for Top 1,000 GitHub Repositories & READMEs (Python).
+Compares `pushed_at` / `updated_at` dates and `description` to skip unnecessary README downloads.
+Stores markdown files in `readmes/` and updates SQLite FTS5 database `data/repos.db`.
 """
 
 import concurrent.futures
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -40,7 +42,6 @@ def load_repos() -> list:
     if os.path.exists(html_path):
         with open(html_path, "r", encoding="utf-8") as f:
             content = f.read()
-        import re
 
         match = re.search(r"const allRepos = (\[.*?\]);\s+let currentSort", content, re.DOTALL)
         if match:
@@ -65,6 +66,7 @@ def init_db() -> sqlite3.Connection:
             language TEXT,
             created_at TEXT,
             updated_at TEXT,
+            pushed_at TEXT,
             archived INTEGER,
             readme_filename TEXT,
             readme_size INTEGER,
@@ -81,7 +83,31 @@ def init_db() -> sqlite3.Connection:
             tokenize = 'porter unicode61'
         );
     """)
+    # Migration check for pushed_at column
+    try:
+        conn.execute("ALTER TABLE repos ADD COLUMN pushed_at TEXT;")
+    except Exception:
+        pass
     return conn
+
+
+def sanitize_readme(content: str) -> str:
+    if not content:
+        return ""
+    content = re.sub(
+        r"https://hooks\.slack\.com/services/[A-Za-z0-9_/]+",
+        "https://hooks.slack.com/services_example/T00/B00/XXXX",
+        content,
+    )
+    content = re.sub(
+        r"https://discord\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+",
+        "https://discord.com/api/webhooks/example/XXXX",
+        content,
+    )
+    content = re.sub(r"gh[pos]_[A-Za-z0-9]{20,}", "ghp_EXAMPLE_TOKEN", content)
+    content = re.sub(r"sk-[A-Za-z0-9_-]{20,}", "sk-EXAMPLE_API_KEY", content)
+    content = re.sub(r"AKIA[0-9A-Z]{16}", "AKIA_EXAMPLE_KEY", content)
+    return content
 
 
 def fetch_readme(repo_name: str, token: str) -> str:
@@ -98,7 +124,8 @@ def fetch_readme(repo_name: str, token: str) -> str:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 if resp.status == 200:
-                    return resp.read().decode("utf-8", errors="replace")
+                    text = resp.read().decode("utf-8", errors="replace")
+                    return sanitize_readme(text)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return ""
@@ -117,17 +144,31 @@ def main():
     token = get_gh_token()
     repos = load_repos()
     print(f"Loaded {len(repos)} repositories.")
-    print("Scraping READMEs and populating SQLite FTS5 database...")
 
     conn = init_db()
-    conn.execute("DELETE FROM repos;")
-    conn.execute("DELETE FROM repos_fts;")
-    conn.commit()
+    conn.row_factory = sqlite3.Row
+
+    # Load existing cached records for date & description comparison
+    existing_map = {}
+    try:
+        rows = conn.execute(
+            "SELECT id, name, description, updated_at, pushed_at, readme_filename, readme_size, readme_text FROM repos"
+        ).fetchall()
+        for r in rows:
+            existing_map[r["name"].lower()] = dict(r)
+        print(f"Found {len(existing_map)} existing cached repositories in database.")
+    except Exception:
+        print("No previous database records found. Starting initial sync.")
 
     start_time = time.time()
     results = []
+    unchanged_count = 0
+    downloaded_count = 0
+
+    print("Checking for updates (comparing pushed_at / updated_at and description)...")
 
     def process_repo(repo):
+        nonlocal unchanged_count, downloaded_count
         name = repo["name"]
         parts = name.split("/")
         owner = parts[0] if len(parts) > 0 else ""
@@ -135,37 +176,63 @@ def main():
         filename = f"{str(repo['id']).zfill(4)}_{owner}__{repo_name}.md"
         filepath = os.path.join(READMES_DIR, filename)
 
+        cached = existing_map.get(name.lower())
+        file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+
+        current_pushed = (
+            repo.get("pushedIso")
+            or repo.get("pushed")
+            or repo.get("updatedIso")
+            or repo.get("updated")
+            or ""
+        )
+        cached_pushed = (
+            cached.get("pushed_at") if cached else ""
+        ) or (cached.get("updated_at") if cached else "")
+
+        current_desc = (repo.get("desc") or "").strip()
+        cached_desc = (cached.get("description") or "").strip() if cached else ""
+
+        is_pushed_same = current_pushed and cached_pushed and current_pushed == cached_pushed
+        is_desc_same = current_desc == cached_desc
+
         readme_text = ""
-        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-                readme_text = f.read()
+        is_downloaded = False
+
+        if is_pushed_same and is_desc_same and file_exists:
+            # Re-use cached without network request
+            readme_text = cached.get("readme_text") if cached else ""
+            if not readme_text and file_exists:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    readme_text = f.read()
+            unchanged_count += 1
         else:
+            # Download fresh README
             readme_text = fetch_readme(name, token)
             if readme_text:
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(readme_text)
+            downloaded_count += 1
+            is_downloaded = True
 
         size = len(readme_text.encode("utf-8"))
-        return (repo, owner, repo_name, filename, size, readme_text)
+        return (repo, owner, repo_name, filename, size, readme_text, current_pushed, is_downloaded)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         futures = [executor.submit(process_repo, r) for r in repos]
-        completed = 0
         for fut in concurrent.futures.as_completed(futures):
-            repo, owner, repo_name, filename, size, readme_text = fut.result()
-            results.append((repo, owner, repo_name, filename, size, readme_text))
-            completed += 1
-            if completed % 100 == 0 or completed == len(repos):
-                elapsed = time.time() - start_time
-                print(f"Progress: {completed}/{len(repos)} READMEs processed ({elapsed:.1f}s)")
+            res = fut.result()
+            results.append(res)
 
-    # Sort by original ID order
     results.sort(key=lambda x: x[0]["id"])
 
-    # Batch insert into DB
+    # Re-insert into DB
+    conn.execute("DELETE FROM repos;")
+    conn.execute("DELETE FROM repos_fts;")
+
     repo_rows = []
     fts_rows = []
-    for repo, owner, repo_name, filename, size, readme_text in results:
+    for repo, owner, repo_name, filename, size, readme_text, pushed_at, _ in results:
         repo_rows.append(
             (
                 repo["id"],
@@ -180,6 +247,7 @@ def main():
                 repo.get("lang", "Unknown"),
                 repo.get("created", ""),
                 repo.get("updated", ""),
+                pushed_at,
                 1 if repo.get("archived") else 0,
                 filename,
                 size,
@@ -198,8 +266,8 @@ def main():
 
     conn.executemany(
         """
-        INSERT INTO repos (id, db_id, name, owner, repo_name, url, description, stars, forks, language, created_at, updated_at, archived, readme_filename, readme_size, readme_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO repos (id, db_id, name, owner, repo_name, url, description, stars, forks, language, created_at, updated_at, pushed_at, archived, readme_filename, readme_size, readme_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
         repo_rows,
     )
@@ -214,9 +282,14 @@ def main():
     conn.commit()
     conn.close()
 
+    elapsed = time.time() - start_time
     db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
-    print(f"\nDone! SQLite FTS5 database: {DB_PATH} ({db_size:.2f} MB)")
-    print(f"Markdown files stored in: {READMES_DIR}")
+
+    print(f"\n=== Synchronization Summary ({elapsed:.2f}s) ===")
+    print(f"• Total Repositories: {len(repos)}")
+    print(f"• Unchanged (Cached, 0 network requests): {unchanged_count}")
+    print(f"• Updated / Newly Downloaded: {downloaded_count}")
+    print(f"• SQLite FTS5 Database: {DB_PATH} ({db_size:.2f} MB)")
 
 
 if __name__ == "__main__":

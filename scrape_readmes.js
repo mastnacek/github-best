@@ -22,13 +22,12 @@ function getGhToken() {
 const token = getGhToken();
 const headers = {
   "User-Agent": "github-best-scraper",
-  "Accept": "application/vnd.github.raw+json"
+  "Accept": "application/vnd.github.raw+json",
 };
 if (token) {
   headers.Authorization = `Bearer ${token}`;
 }
 
-// Load top 1000 repos from index.html or generate from gh
 function loadRepos() {
   const htmlPath = path.join(SCRIPT_DIR, "index.html");
   if (fs.existsSync(htmlPath)) {
@@ -41,7 +40,6 @@ function loadRepos() {
   throw new Error("Could not find allRepos in index.html. Run generate-and-push first.");
 }
 
-// SQLite Database Setup
 function initDb() {
   const db = new DatabaseSync(DB_PATH);
   db.exec(`
@@ -58,6 +56,7 @@ function initDb() {
       language TEXT,
       created_at TEXT,
       updated_at TEXT,
+      pushed_at TEXT,
       archived INTEGER,
       readme_filename TEXT,
       readme_size INTEGER,
@@ -73,6 +72,14 @@ function initDb() {
       tokenize = 'porter unicode61'
     );
   `);
+
+  // Migration check for pushed_at column if older table
+  try {
+    db.exec("ALTER TABLE repos ADD COLUMN pushed_at TEXT;");
+  } catch {
+    // Column already exists
+  }
+
   return db;
 }
 
@@ -88,7 +95,6 @@ function sanitizeReadme(content) {
     .replace(/AKIA[0-9A-Z]{16}/g, "AKIA_EXAMPLE_KEY");
 }
 
-// Fetch single README with retry
 async function fetchReadme(repoName) {
   const url = `https://api.github.com/repos/${repoName}/readme`;
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -99,23 +105,22 @@ async function fetchReadme(repoName) {
         return sanitizeReadme(text);
       }
       if (res.status === 404) {
-        return ""; // No README
+        return "";
       }
       if (res.status === 403 || res.status === 429) {
         console.warn(`Rate limit hit on attempt ${attempt}, waiting 3s...`);
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, 3000));
         continue;
       }
       return "";
     } catch {
       if (attempt === 3) return "";
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
   return "";
 }
 
-// Concurrency pool
 async function asyncPool(limit, items, iteratorFn) {
   const ret = [];
   const executing = new Set();
@@ -135,23 +140,27 @@ async function asyncPool(limit, items, iteratorFn) {
 async function main() {
   const repos = loadRepos();
   console.log(`Loaded ${repos.length} repositories from index.html.`);
-  console.log(`Scraping READMEs with 20 concurrent connections...`);
 
   const db = initDb();
-  db.exec("DELETE FROM repos; DELETE FROM repos_fts;");
 
-  const insertRepoStmt = db.prepare(`
-    INSERT INTO repos (id, db_id, name, owner, repo_name, url, description, stars, forks, language, created_at, updated_at, archived, readme_filename, readme_size, readme_text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  // Load existing cached records for differential comparison
+  const existingMap = new Map();
+  try {
+    const existingRows = db.prepare("SELECT id, name, description, updated_at, pushed_at, readme_filename, readme_size, readme_text FROM repos").all();
+    for (const r of existingRows) {
+      existingMap.set(r.name.toLowerCase(), r);
+    }
+    console.log(`Found ${existingMap.size} existing cached repositories in database.`);
+  } catch (e) {
+    console.log("No previous database records found. Starting initial sync.");
+  }
 
-  const insertFtsStmt = db.prepare(`
-    INSERT INTO repos_fts (id, name, description, language, readme_text)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-
-  let completed = 0;
+  let unchangedCount = 0;
+  let downloadedCount = 0;
   const startTime = Date.now();
+  const processedData = [];
+
+  console.log("Checking for updates (comparing pushed_at / updated_at and description)...");
 
   await asyncPool(20, repos, async (repo) => {
     const parts = repo.name.split("/");
@@ -160,61 +169,105 @@ async function main() {
     const safeFilename = `${String(repo.id).padStart(4, "0")}_${owner}__${repoName}.md`;
     const readmeFile = path.join(READMES_DIR, safeFilename);
 
+    const cached = existingMap.get(repo.name.toLowerCase());
+    const fileExists = fs.existsSync(readmeFile) && fs.statSync(readmeFile).size > 0;
+
+    const currentPushed = repo.pushedIso || repo.pushed || repo.updatedIso || repo.updated || "";
+    const cachedPushed = cached?.pushed_at || cached?.updated_at || "";
+
+    const currentDesc = (repo.desc || "").trim();
+    const cachedDesc = (cached?.description || "").trim();
+
+    // Check if both dates and description are unchanged AND file exists
+    const isPushedUnchanged = currentPushed && cachedPushed && currentPushed === cachedPushed;
+    const isDescUnchanged = currentDesc === cachedDesc;
+
     let readmeContent = "";
-    // Check if cached on disk
-    if (fs.existsSync(readmeFile) && fs.statSync(readmeFile).size > 0) {
-      readmeContent = fs.readFileSync(readmeFile, "utf8");
+    let isDownloaded = false;
+
+    if (isPushedUnchanged && isDescUnchanged && fileExists) {
+      // Unchanged -> Use local cache without network call
+      readmeContent = cached?.readme_text || fs.readFileSync(readmeFile, "utf8");
+      unchangedCount++;
     } else {
+      // Changed or missing -> Download fresh README
       readmeContent = await fetchReadme(repo.name);
       if (readmeContent) {
         fs.writeFileSync(readmeFile, readmeContent, "utf8");
       }
+      downloadedCount++;
+      isDownloaded = true;
     }
 
     const readmeSize = Buffer.byteLength(readmeContent, "utf8");
-
-    // Insert into SQLite
-    insertRepoStmt.run(
-      repo.id,
-      repo.dbId || repo.id,
-      repo.name,
+    processedData.push({
+      repo,
       owner,
       repoName,
-      repo.url,
-      repo.desc || "",
-      repo.stars || 0,
-      repo.forks || 0,
-      repo.lang || "Unknown",
-      repo.created || "",
-      repo.updated || "",
-      repo.archived ? 1 : 0,
       safeFilename,
       readmeSize,
-      readmeContent
+      readmeContent,
+      pushedAt: currentPushed,
+      isDownloaded,
+    });
+  });
+
+  // Re-populate SQLite tables in order of ranking
+  processedData.sort((a, b) => a.repo.id - b.repo.id);
+
+  db.exec("DELETE FROM repos; DELETE FROM repos_fts;");
+
+  const insertRepoStmt = db.prepare(`
+    INSERT INTO repos (id, db_id, name, owner, repo_name, url, description, stars, forks, language, created_at, updated_at, pushed_at, archived, readme_filename, readme_size, readme_text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const insertFtsStmt = db.prepare(`
+    INSERT INTO repos_fts (id, name, description, language, readme_text)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  for (const item of processedData) {
+    insertRepoStmt.run(
+      item.repo.id,
+      item.repo.dbId || item.repo.id,
+      item.repo.name,
+      item.owner,
+      item.repoName,
+      item.repo.url,
+      item.repo.desc || "",
+      item.repo.stars || 0,
+      item.repo.forks || 0,
+      item.repo.lang || "Unknown",
+      item.repo.created || "",
+      item.repo.updated || "",
+      item.pushedAt || "",
+      item.repo.archived ? 1 : 0,
+      item.safeFilename,
+      item.readmeSize,
+      item.readmeContent
     );
 
     insertFtsStmt.run(
-      repo.id,
-      repo.name,
-      repo.desc || "",
-      repo.lang || "Unknown",
-      readmeContent
+      item.repo.id,
+      item.repo.name,
+      item.repo.desc || "",
+      item.repo.lang || "Unknown",
+      item.readmeContent
     );
+  }
 
-    completed++;
-    if (completed % 100 === 0 || completed === repos.length) {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`Progress: ${completed}/${repos.length} READMEs processed (${elapsed}s)`);
-    }
-  });
-
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
   const totalBytes = fs.statSync(DB_PATH).size;
-  console.log(`\nScraping and FTS5 indexing complete!`);
-  console.log(`SQLite database created: ${DB_PATH} (${(totalBytes / 1024 / 1024).toFixed(2)} MB)`);
-  console.log(`Markdown files stored in: ${READMES_DIR}`);
+
+  console.log(`\n=== Synchronization Summary (${elapsed}s) ===`);
+  console.log(`• Total Repositories: ${repos.length}`);
+  console.log(`• Unchanged (Cached, 0 network requests): ${unchangedCount}`);
+  console.log(`• Updated / Newly Downloaded: ${downloadedCount}`);
+  console.log(`• SQLite FTS5 Database: ${DB_PATH} (${(totalBytes / 1024 / 1024).toFixed(2)} MB)`);
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error("Fatal error:", err);
   process.exit(1);
 });
