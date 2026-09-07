@@ -570,26 +570,26 @@ def main():
         f.write(readme_content)
     print("Saved README.md")
 
-    print("Initializing git and pushing to GitHub repository 'mastnacek/mastnacek'...")
+    print("Initializing git and pushing to GitHub repository 'mastnacek/github-best'...")
     if not os.path.exists(".git"):
         run_cmd("git init")
     run_cmd("git checkout -B main")
 
-    repo_check = run_cmd("gh repo view mastnacek/mastnacek --json nameWithOwner")
-    if "mastnacek/mastnacek" not in repo_check:
-        print("Creating GitHub repository 'mastnacek/mastnacek'...")
+    repo_check = run_cmd("gh repo view mastnacek/github-best --json nameWithOwner")
+    if "mastnacek/github-best" not in repo_check:
+        print("Creating GitHub repository 'mastnacek/github-best'...")
         run_cmd(
-            'gh repo create mastnacek/mastnacek --public --description "Top 1,000 Most Starred GitHub Repositories (All Time)"'
+            'gh repo create mastnacek/github-best --public --description "Top 1,000 Most Starred GitHub Repositories (All Time)"'
         )
 
     run_cmd("git remote remove origin")
-    run_cmd("git remote add origin https://github.com/mastnacek/mastnacek.git")
+    run_cmd("git remote add origin https://github.com/mastnacek/github-best.git")
     run_cmd("git add .")
     run_cmd(
         'git commit -m "Update Top 1,000 GitHub Repositories dashboard and generator scripts"'
     )
     run_cmd("git push -u origin main --force")
-    print("Successfully pushed to https://github.com/mastnacek/mastnacek")
+    print("Successfully pushed to https://github.com/mastnacek/github-best")
 
 
 if __name__ == "__main__":

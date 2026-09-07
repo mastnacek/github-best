@@ -567,25 +567,25 @@ async function main() {
   console.log("Generated README.md");
 
   // Git repository initialization and push
-  console.log("Initializing git and pushing to GitHub (mastnacek/mastnacek)...");
+  console.log("Initializing git and pushing to GitHub (mastnacek/github-best)...");
   if (!fs.existsSync(path.join(scriptDir, ".git"))) {
     runCmd("git init");
   }
   runCmd("git checkout -B main");
 
   // Check if GitHub repo exists
-  const repoCheck = runCmd("gh repo view mastnacek/mastnacek --json nameWithOwner");
-  if (!repoCheck || !repoCheck.includes("mastnacek/mastnacek")) {
-    console.log("Creating GitHub repository 'mastnacek/mastnacek'...");
-    runCmd("gh repo create mastnacek/mastnacek --public --description \"Top 1,000 Most Starred GitHub Repositories (All Time)\"");
+  const repoCheck = runCmd("gh repo view mastnacek/github-best --json nameWithOwner");
+  if (!repoCheck || !repoCheck.includes("mastnacek/github-best")) {
+    console.log("Creating GitHub repository 'mastnacek/github-best'...");
+    runCmd("gh repo create mastnacek/github-best --public --description \"Top 1,000 Most Starred GitHub Repositories (All Time)\"");
   }
 
   runCmd("git remote remove origin");
-  runCmd("git remote add origin https://github.com/mastnacek/mastnacek.git");
+  runCmd("git remote add origin https://github.com/mastnacek/github-best.git");
   runCmd("git add .");
   runCmd('git commit -m "Update Top 1,000 GitHub Repositories dashboard and generator scripts"');
   runCmd("git push -u origin main --force");
-  console.log("Successfully pushed to https://github.com/mastnacek/mastnacek");
+  console.log("Successfully pushed to https://github.com/mastnacek/github-best");
 }
 
 main().catch((err) => {
