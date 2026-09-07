@@ -1,13 +1,87 @@
-# ⭐ Top 1,000 GitHub Repositories (All Time)
+# ⭐ Top 1,000 GitHub Repositories (All Time) + README Search & MCP Server
 
-Automated curation and interactive dashboard of the **Top 1,000 most-starred public repositories** in GitHub history, generated directly using the GitHub CLI API (`gh api`).
+Automated curation, interactive dashboard, full-text README search engine, and Model Context Protocol (MCP) server for the **Top 1,000 most-starred public repositories** in GitHub history.
 
-## 🌐 Live Interactive Dashboard
-Open [`index.html`](./index.html) in any browser for:
-- ⚡ **Instant Search:** Search across repository names, topics, and descriptions.
-- 🎯 **Multi-Sort:** Sort by Stars, Forks, Creation Date, Last Updated, and Name.
-- 🏷️ **Language Filter:** Real-time filtering across 40+ primary programming languages.
-- 📌 **Accurate Global Ranking:** Persistent #1 to #1000 rank badges.
+---
+
+## 🚀 Features
+
+- 🌐 **Interactive Web Dashboard (`index.html`)**: Pre-rendered static HTML with instant search, multi-sort (Stars, Forks, Created, Updated, Name), dynamic language filters, and persistent global rankings (#1 to #1000).
+- 📚 **1,000 Scraped READMEs (`readmes/`)**: Verbatim markdown README documentation scraped and stored locally for every repository.
+- ⚡ **SQLite FTS5 Search Engine (`search.py` / `search.js`)**: Sub-millisecond BM25 ranked full-text search across all 1,000 repository READMEs with match highlighting and snippet generation.
+- 🤖 **Model Context Protocol (MCP) Server (`mcp_server.py` / `mcp-server.js`)**: Connect the repository database and README search engine directly to Claude, Pi, OpenCode, Cursor, and any MCP-compatible agent.
+
+---
+
+## 🔍 CLI Search (BM25 Full-Text Search)
+
+Search across repository titles, descriptions, and full README texts directly from your terminal:
+
+```bash
+# Search using Python
+python search.py "vector database"
+python search.py "agentic workflow" --lang Python --limit 5
+
+# Search using Node.js
+node search.js "transformer model"
+node search.js "coding agent" -n 10
+```
+
+---
+
+## 🤖 MCP Server Setup
+
+Add this MCP server to your AI assistants (Claude Desktop, Pi Agent, Cursor, OpenCode):
+
+### Claude Desktop (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "github-best": {
+      "command": "python",
+      "args": ["D:/01_programovani/gihub-best/mcp_server.py"]
+    }
+  }
+}
+```
+
+### Pi Agent / Custom MCP (`mcp.json`):
+```json
+{
+  "mcpServers": {
+    "github-best": {
+      "command": "node",
+      "args": ["D:/01_programovani/gihub-best/mcp-server.js"]
+    }
+  }
+}
+```
+
+### MCP Tools Available:
+- `search_repos(query, limit, language, min_stars)`: Full-text search with BM25 ranking across 1,000 READMEs.
+- `get_repo_readme(name_or_id, max_chars, offset)`: Retrieve full or paginated markdown README by rank ID (e.g. `121`) or repo name.
+- `get_repo_info(name_or_id)`: Detailed metadata, stars, forks, and language information.
+- `list_top_repos(limit, language, sort_by)`: Filter and sort top repositories.
+
+---
+
+## 📦 Data Scraping & Regeneration
+
+To re-fetch repository rankings and re-index all READMEs:
+
+```bash
+# 1. Fetch latest top 1,000 repos from GitHub CLI
+node generate-and-push.ts
+# or
+python generate_and_push.py
+
+# 2. Scrape & re-index all READMEs into SQLite FTS5 database
+node scrape_readmes.js
+# or
+python scrape_readmes.py
+```
+
+---
 
 ## 🏆 Top 20 Repositories Preview
 
